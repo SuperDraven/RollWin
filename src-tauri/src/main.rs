@@ -8,13 +8,22 @@ use std::io::{Read, Write};
 use ssh2::Session;
 use std::net::TcpStream;
 
-// 添加备份相关的函数
-fn create_backup_dir(project_name: &str, env: &str) -> Result<PathBuf, String> {
-    let backup_base = PathBuf::from("backups");
-    let backup_project = backup_base.join(project_name).join(env);
-    fs::create_dir_all(&backup_project)
+// 获取备份目录
+#[command]
+fn get_backup_dir(project_name: &str, env: &str) -> Result<String, String> {
+    let app_dir = get_app_dir();
+    let backup_dir = Path::new(&app_dir)
+        .join("backups")
+        .join(project_name)
+        .join(env);
+    
+    // 确保备份目录存在
+    fs::create_dir_all(&backup_dir)
         .map_err(|e| format!("创建备份目录失败: {}", e))?;
-    Ok(backup_project)
+    
+    Ok(backup_dir.to_str()
+        .ok_or_else(|| "路径转换失败".to_string())?
+        .to_string())
 }
 
 // 从远程服务器下载文件到本地备份
@@ -23,15 +32,20 @@ fn download_for_backup(
     remote_path: &Path,
     backup_path: &Path,
 ) -> Result<(), String> {
-    // 确保本地备份目录存在
+    // 确保备份目录存在
     fs::create_dir_all(backup_path)
         .map_err(|e| format!("创建备份目录失败: {}", e))?;
 
     // 读取远程目录内容
-    let remote_dir = sftp.readdir(remote_path)
-        .map_err(|e| format!("读取远程目录失败: {}", e))?;
+    let remote_dir = match sftp.readdir(remote_path) {
+        Ok(dir) => dir,
+        Err(_) => {
+            // 如果目录不存在，直接返回
+            return Ok(());
+        }
+    };
 
-    // 遍下载每个文件
+    // 遍历并下载每个文件
     for (path, stat) in remote_dir {
         let file_name = path.file_name()
             .ok_or_else(|| "无效的文件名".to_string())?
@@ -63,9 +77,9 @@ fn download_for_backup(
 
 #[command]
 async fn deploy_project(
-    _project_name: String,
+    project_name: String,
     path: String,
-    _env: String,
+    env: String,
     host: String,
     username: String,
     password: String,
@@ -92,7 +106,6 @@ async fn deploy_project(
                 sess.handshake()
                     .map_err(|e| format!("握手失败: {}", e))?;
 
-                // 设置更长的超时时间
                 sess.set_timeout(30000);  // 30秒
 
                 sess.userauth_password(&username, &password)
@@ -100,6 +113,13 @@ async fn deploy_project(
 
                 let sftp = sess.sftp()
                     .map_err(|e| format!("创建SFTP会话失败: {}", e))?;
+
+                // 在上传文件之前先备份
+                let backup_dir = get_backup_dir(&project_name, &env)?;
+                let remote_path_buf = PathBuf::from(&remote_path);
+                
+                // 创建备份
+                download_for_backup(&sftp, &remote_path_buf, &PathBuf::from(backup_dir))?;
 
                 // 上传文件
                 let local_path = Path::new(&path);
@@ -138,11 +158,9 @@ fn upload_dir(sftp: &ssh2::Sftp, local_path: &Path, remote_path: &Path) -> Resul
         let remote_path = remote_path.join(file_name);
 
         if local_path.is_dir() {
-            // 如果是目录，先创建再递归上传
             let _ = sftp.mkdir(&remote_path, 0o755);
             upload_dir(sftp, &local_path, &remote_path)?;
         } else {
-            // 上传文件
             let mut file = fs::File::open(&local_path)
                 .map_err(|e| format!("打开本地文件失败 {}: {}", local_path.display(), e))?;
             let mut contents = Vec::new();
@@ -192,6 +210,15 @@ async fn rollback_project(
     let sftp = sess.sftp()
         .map_err(|e| format!("创建SFTP会话失败: {}", e))?;
 
+    // 获取最新的备份
+    let backup_dir = get_backup_dir(&project_name, &env)?;
+    let backup_path = PathBuf::from(backup_dir);
+
+    // 检查备份是否存在
+    if !backup_path.exists() {
+        return Err("没有找到可用的备份".to_string());
+    }
+
     // 上传 version.json
     let remote_version_path = Path::new(&remote_path).join("version.json");
     let local_version_path = Path::new(&path).join("version.json");
@@ -206,19 +233,12 @@ async fn rollback_project(
     remote_file.write(&version_content)
         .map_err(|e| format!("写入远程版本文件失败: {}", e))?;
 
-    // 上传其他文件
+    // 上传备份文件到服务器
     let remote_path = Path::new(&remote_path);
-    upload_dir(&sftp, Path::new(&path), remote_path)
+    upload_dir(&sftp, &backup_path, remote_path)
         .map_err(|e| format!("回滚失败: {}", e))?;
 
     Ok(())
-}
-
-// 添加一个询问用户是否继续的函数
-async fn ask_continue() -> Result<bool, String> {
-    // 这里可以通过前端对话框询问用户
-    // 暂时直接返回 true
-    Ok(true)
 }
 
 #[command]
@@ -241,7 +261,7 @@ fn get_app_dir() -> String {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![deploy_project, rollback_project, get_app_dir])
+        .invoke_handler(tauri::generate_handler![deploy_project, rollback_project, get_app_dir, get_backup_dir])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
