@@ -2,7 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { open, message, ask } from '@tauri-apps/api/dialog'
 import { invoke } from '@tauri-apps/api/tauri'
-import { appDataDir, join } from '@tauri-apps/api/path'
+import { join } from '@tauri-apps/api/path'
 import { exists, createDir, readTextFile, writeTextFile } from '@tauri-apps/api/fs'
 import { Command } from '@tauri-apps/api/shell'
 
