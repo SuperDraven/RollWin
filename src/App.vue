@@ -25,10 +25,16 @@ interface ProjectConfig {
   }
 }
 
+interface Toast {
+  message: string;
+  type: 'success' | 'error';
+}
+
 const projects = ref<ProjectConfig[]>([])
 const showAddDialog = ref(false)
 const deployingProjects = ref<Map<string, boolean>>(new Map());
 const deployStatusMap = ref<Map<string, DeployStatus>>(new Map());
+const toast = ref<Toast | null>(null);
 
 // 添加辅助函数来管理项目状态
 function setProjectDeploying(projectId: string, isDeploying: boolean) {
@@ -168,13 +174,13 @@ async function saveProject() {
     return;
   }
 
-  // 如果有打包命令，则验证格式
   if (newProject.value.buildCommand && !validateBuildCommand(newProject.value.buildCommand)) {
     await message('打包命令格式不正确，请使用 npm run xxx 格式', { type: 'error' });
     return;
   }
 
   try {
+    // 使用统一的配置路径
     const appDir = await invoke('get_app_dir');
     const configPath = await join(appDir as string, 'config', 'projects.json');
     const configDir = await join(appDir as string, 'config');
@@ -193,7 +199,7 @@ async function saveProject() {
       name: '',
       path: '',
       projectPath: '',
-      buildCommand: undefined,  // 改为 undefined
+      buildCommand: undefined,
       environment: 'prod',
       version: '1.0.0',
       serverInfo: {
@@ -203,7 +209,7 @@ async function saveProject() {
         remotePath: ''
       }
     };
-    await message('保存成功！', { type: 'info' });
+    showToast('添加成功', 'success');
   } catch (error) {
     await message('保存失败：' + error, { type: 'error' });
   }
@@ -269,14 +275,12 @@ async function deployProject(project: ProjectConfig) {
       const versionPath = await join(project.path, 'version.json');
       await writeTextFile(versionPath, JSON.stringify(versionInfo, null, 2));
 
-      // 保存到本地配置
-      const appData = await appDataDir();
-      const configDir = await join(appData, 'config');
-      const configPath = await join(configDir, 'projects.json');
+      // 修改这部分，使用统一的配置路径
+      const appDir = await invoke('get_app_dir');
+      const configPath = await join(appDir as string, 'config', 'projects.json');
       await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
     } catch (error) {
       console.error('创建版本文件失败:', error);
-      // 继续执行，不断发布程
     }
 
     deployStatusMap.value.set(project.id, { isDeploying: true, status: '正在上传文件...' });
@@ -285,10 +289,7 @@ async function deployProject(project: ProjectConfig) {
       ? project.serverInfo.remotePath
       : '/' + project.serverInfo.remotePath;
 
-    // 更新发布时间
-    project.lastDeployTime = new Date().toISOString();
-
-    // 调用后发布
+    // 调用后端发布
     await invoke('deploy_project', {
       projectName: project.name,
       path: project.path,
@@ -299,7 +300,15 @@ async function deployProject(project: ProjectConfig) {
       remotePath: remotePath
     });
 
+    // 发布成功后更新时间和显示提示
+    project.lastDeployTime = new Date().toISOString();
     deployStatusMap.value.set(project.id, { isDeploying: true, status: '发布完成' });
+    showToast('发布成功', 'success');
+
+    // 保存到本地配置
+    const appDir = await invoke('get_app_dir');
+    const configPath = await join(appDir as string, 'config', 'projects.json');
+    await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
   } catch (error) {
     await message(`发布失败：${error}`, { type: 'error' });
     if (project.previousVersion) {
@@ -363,10 +372,9 @@ async function rollbackVersion(project: ProjectConfig) {
       const versionPath = await join(project.path, 'version.json');
       await writeTextFile(versionPath, JSON.stringify(versionInfo, null, 2));
 
-      // 保存到本地配置
-      const appData = await appDataDir();
-      const configDir = await join(appData, 'config');
-      const configPath = await join(configDir, 'projects.json');
+      // 修改这部分，使用统一的配置路径
+      const appDir = await invoke('get_app_dir');
+      const configPath = await join(appDir as string, 'config', 'projects.json');
       await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
     } catch (error) {
       console.error('更新版本文件失败:', error);
@@ -389,16 +397,15 @@ async function rollbackVersion(project: ProjectConfig) {
       remotePath: remotePath
     });
 
-    // 更新回滚时间
+    // 回滚成功后更新时间和显示提示
     project.lastRollbackTime = new Date().toISOString();
+    deployStatusMap.value.set(project.id, { isDeploying: true, status: '回滚完成' });
+    showToast('回滚成功', 'success');
 
     // 保存到本地配置
-    const appData = await appDataDir();
-    const configDir = await join(appData, 'config');
-    const configPath = await join(configDir, 'projects.json');
+    const appDir = await invoke('get_app_dir');
+    const configPath = await join(appDir as string, 'config', 'projects.json');
     await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
-
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '回滚完成' });
   } catch (error) {
     await message(`回滚失败：${error}`, { type: 'error' });
     if (project.previousVersion) {
@@ -422,12 +429,13 @@ async function deleteProject(project: ProjectConfig) {
   if (!confirmed) return;
 
   try {
+    // 使用统一的配置路径
     const appDir = await invoke('get_app_dir');
     const configPath = await join(appDir as string, 'config', 'projects.json');
 
     projects.value = projects.value.filter(p => p.id !== project.id);
     await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
-    await message('删除成功！', { type: 'info' });
+    showToast('删除成功', 'success');
   } catch (error) {
     await message(`删除失败：${error}`, { type: 'error' });
   }
@@ -514,6 +522,14 @@ async function selectEditDirectory() {
   }
 }
 
+// 添加显示消息的函数
+function showToast(message: string, type: 'success' | 'error' = 'success') {
+  toast.value = { message, type };
+  setTimeout(() => {
+    toast.value = null;
+  }, 3000);
+}
+
 onMounted(() => {
   loadProjects()
 })
@@ -521,6 +537,13 @@ onMounted(() => {
 
 <template>
   <div class="container">
+    <!-- 添加顶部消息提示 -->
+    <Transition name="toast">
+      <div v-if="toast" :class="['toast', toast.type]">
+        {{ toast.message }}
+      </div>
+    </Transition>
+
     <div class="header">
       <h1 class="title">RollWin</h1>
       <button class="add-btn" @click="showAddDialog = true">新增项目</button>
@@ -1257,6 +1280,53 @@ input {
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+/* 添加顶部提示样式 */
+.toast {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 10px 20px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: 500;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  animation: slideDown 0.3s ease;
+}
+
+.toast.success {
+  background: #059669;
+  color: white;
+}
+
+.toast.error {
+  background: #dc2626;
+  color: white;
+}
+
+.toast-enter-active,
+.toast-leave-active {
+  transition: all 0.3s ease;
+}
+
+.toast-enter-from,
+.toast-leave-to {
+  opacity: 0;
+  transform: translate(-50%, -20px);
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -20px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
   }
 }
 </style>

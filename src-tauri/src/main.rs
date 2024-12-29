@@ -225,10 +225,9 @@ async fn ask_continue() -> Result<bool, String> {
 fn get_app_dir() -> String {
     #[cfg(debug_assertions)]
     {
-        // 开发模式下使用 src-tauri 目录
+        // 开发模式下使用当前目录
         let current_dir = std::env::current_dir().unwrap();
-        let app_dir = current_dir.join("src-tauri");
-        app_dir.to_str().unwrap().to_string()
+        current_dir.to_str().unwrap().to_string()
     }
 
     #[cfg(not(debug_assertions))]
