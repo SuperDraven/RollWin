@@ -75,8 +75,88 @@ fn download_for_backup(
     Ok(())
 }
 
+// 添加一个新的结构体来表示上传进度
+#[derive(serde::Serialize, Clone)]
+struct UploadProgress {
+    current: usize,
+    total: usize,
+    percentage: f32,
+}
+
+// 添加一个函数来计算目录中的文件总数
+fn count_files(path: &Path) -> Result<usize, String> {
+    let mut count = 0;
+    if path.is_dir() {
+        for entry in fs::read_dir(path)
+            .map_err(|e| format!("读取目录失败: {}", e))? {
+            let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
+            let path = entry.path();
+            if path.is_file() {
+                count += 1;
+            } else if path.is_dir() {
+                count += count_files(&path)?;
+            }
+        }
+    }
+    Ok(count)
+}
+
+// 修改 upload_dir 函数，添加进度回调
+fn upload_dir(
+    sftp: &ssh2::Sftp, 
+    local_path: &Path, 
+    remote_path: &Path,
+    window: tauri::Window,
+    total_files: usize,
+    uploaded_files: &mut usize,
+) -> Result<(), String> {
+    let _ = sftp.mkdir(remote_path, 0o755);
+
+    for entry in fs::read_dir(local_path)
+        .map_err(|e| format!("读取本地目录失败: {}", e))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
+        let local_path = entry.path();
+        let file_name = local_path.file_name()
+            .ok_or_else(|| "无效的文件名".to_string())?
+            .to_str()
+            .ok_or_else(|| "文件名编码错误".to_string())?;
+        let remote_path = remote_path.join(file_name);
+
+        if local_path.is_dir() {
+            let _ = sftp.mkdir(&remote_path, 0o755);
+            upload_dir(sftp, &local_path, &remote_path, window.clone(), total_files, uploaded_files)?;
+        } else {
+            let mut file = fs::File::open(&local_path)
+                .map_err(|e| format!("打开本地文件失败 {}: {}", local_path.display(), e))?;
+            let mut contents = Vec::new();
+            file.read_to_end(&mut contents)
+                .map_err(|e| format!("读取文件内容失败 {}: {}", local_path.display(), e))?;
+
+            let mut remote_file = sftp.create(&remote_path)
+                .map_err(|e| format!("创建远程文件失败 {}: {}", remote_path.display(), e))?;
+            remote_file.write(&contents)
+                .map_err(|e| format!("写入远程文件失败 {}: {}", remote_path.display(), e))?;
+
+            *uploaded_files += 1;
+            
+            // 发送进度更新事件
+            let percentage = (*uploaded_files as f32 / total_files as f32) * 100.0;
+            let progress = UploadProgress {
+                current: *uploaded_files,
+                total: total_files,
+                percentage,
+            };
+            
+            let _ = window.emit("upload-progress", progress);
+        }
+    }
+
+    Ok(())
+}
+
 #[command]
 async fn deploy_project(
+    window: tauri::Window,
     project_name: String,
     path: String,
     env: String,
@@ -114,6 +194,11 @@ async fn deploy_project(
                 let sftp = sess.sftp()
                     .map_err(|e| format!("创建SFTP会话失败: {}", e))?;
 
+                // 计算总文件数
+                let local_path = Path::new(&path);
+                let total_files = count_files(local_path)?;
+                let mut uploaded_files = 0;
+
                 // 在上传文件之前先备份
                 let backup_dir = get_backup_dir(&project_name, &env)?;
                 let remote_path_buf = PathBuf::from(&remote_path);
@@ -122,10 +207,8 @@ async fn deploy_project(
                 download_for_backup(&sftp, &remote_path_buf, &PathBuf::from(backup_dir))?;
 
                 // 上传文件
-                let local_path = Path::new(&path);
                 let remote_path = Path::new(&remote_path);
-
-                upload_dir(&sftp, local_path, remote_path)
+                upload_dir(&sftp, local_path, remote_path, window, total_files, &mut uploaded_files)
                     .map_err(|e| format!("上传文件失败: {}", e))?;
 
                 return Ok(());
@@ -143,42 +226,9 @@ async fn deploy_project(
     Err(format!("连接服务器失败: {}", last_error.unwrap()))
 }
 
-fn upload_dir(sftp: &ssh2::Sftp, local_path: &Path, remote_path: &Path) -> Result<(), String> {
-    // 尝试创建当前目录，忽略已存在的错误
-    let _ = sftp.mkdir(remote_path, 0o755);
-
-    for entry in fs::read_dir(local_path)
-        .map_err(|e| format!("读取本地目录失败: {}", e))? {
-        let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
-        let local_path = entry.path();
-        let file_name = local_path.file_name()
-            .ok_or_else(|| "无效的文件名".to_string())?
-            .to_str()
-            .ok_or_else(|| "文件名编码错误".to_string())?;
-        let remote_path = remote_path.join(file_name);
-
-        if local_path.is_dir() {
-            let _ = sftp.mkdir(&remote_path, 0o755);
-            upload_dir(sftp, &local_path, &remote_path)?;
-        } else {
-            let mut file = fs::File::open(&local_path)
-                .map_err(|e| format!("打开本地文件失败 {}: {}", local_path.display(), e))?;
-            let mut contents = Vec::new();
-            file.read_to_end(&mut contents)
-                .map_err(|e| format!("读取文件内容失败 {}: {}", local_path.display(), e))?;
-
-            let mut remote_file = sftp.create(&remote_path)
-                .map_err(|e| format!("创建远程文件失败 {}: {}", remote_path.display(), e))?;
-            remote_file.write(&contents)
-                .map_err(|e| format!("写入远程文件失败 {}: {}", remote_path.display(), e))?;
-        }
-    }
-
-    Ok(())
-}
-
 #[command]
 async fn rollback_project(
+    window: tauri::Window,
     project_name: String,
     path: String,
     env: String,
@@ -233,9 +283,13 @@ async fn rollback_project(
     remote_file.write(&version_content)
         .map_err(|e| format!("写入远程版本文件失败: {}", e))?;
 
+    // 计算总文件数
+    let total_files = count_files(&backup_path)?;
+    let mut uploaded_files = 0;
+
     // 上传备份文件到服务器
     let remote_path = Path::new(&remote_path);
-    upload_dir(&sftp, &backup_path, remote_path)
+    upload_dir(&sftp, &backup_path, remote_path, window, total_files, &mut uploaded_files)
         .map_err(|e| format!("回滚失败: {}", e))?;
 
     Ok(())
@@ -261,7 +315,12 @@ fn get_app_dir() -> String {
 
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![deploy_project, rollback_project, get_app_dir, get_backup_dir])
+        .invoke_handler(tauri::generate_handler![
+            deploy_project,
+            rollback_project,
+            get_app_dir,
+            get_backup_dir
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -5,6 +5,7 @@ import { invoke } from '@tauri-apps/api/tauri'
 import { join } from '@tauri-apps/api/path'
 import { exists, createDir, readTextFile, writeTextFile } from '@tauri-apps/api/fs'
 import { Command } from '@tauri-apps/api/shell'
+import { appWindow } from '@tauri-apps/api/window'
 
 interface ProjectConfig {
   id: string
@@ -215,26 +216,31 @@ async function saveProject() {
   }
 }
 
-// 修改状态管理接口
+// 添加进度状态接口
+interface UploadProgress {
+  current: number;
+  total: number;
+  percentage: number;
+}
+
+// 添加进度状态到 deployStatusMap
 interface DeployStatus {
-  isDeploying: boolean;
-  status: string;
+  message: string;
+  progress?: UploadProgress;
 }
 
 // 修改发布函数中的状态更新
 async function deployProject(project: ProjectConfig) {
+  if (isProjectDeploying(project.id)) return;
+  
+  setProjectDeploying(project.id, true);
+  deployStatusMap.value.set(project.id, { message: '准备发布...' });
+
   try {
-    if (!project.serverInfo.remotePath) {
-      await message('远程目录路径不能为空', { type: 'error' });
-      return;
-    }
-
-    setProjectDeploying(project.id, true);
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '准备发布...' });
-
+    // 如果有打包命令，先执行打包
     if (project.buildCommand) {
       try {
-        deployStatusMap.value.set(project.id, { isDeploying: true, status: '正在执行打包命令...' });
+        deployStatusMap.value.set(project.id, { message: '正在执行打包命令...' });
         const isWindows = navigator.platform.includes('Win');
         const npmCmd = isWindows ? 'npm-windows' : 'npm';
         
@@ -250,59 +256,31 @@ async function deployProject(project: ProjectConfig) {
       }
     }
 
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '正在准备文件...' });
-    // 更新版本号
-    const versionParts = project.version.split('.');
-    project.previousVersion = project.version;  // 保存当前版本号
-    
-    // 正确处理版本号
-    const major = parseInt(versionParts[0] || '1');
-    const minor = parseInt(versionParts[1] || '0');
-    const patch = parseInt(versionParts[2] || '0') + 1;
-    project.version = `${major}.${minor}.${patch}`;
+    // 监听上传进度
+    const unlisten = await appWindow.listen<UploadProgress>('upload-progress', (event) => {
+      deployStatusMap.value.set(project.id, {
+        message: '正在上传文件...',
+        progress: event.payload
+      });
+    });
 
-    // 创建 version.json 内容
-    const versionInfo = {
-      version: project.version,
-      previousVersion: project.previousVersion,
-      updateTime: new Date().toISOString(),
-      projectName: project.name,
-      environment: project.environment
-    };
-
-    // 在本地项目目录下创建 version.json
-    try {
-      const versionPath = await join(project.path, 'version.json');
-      await writeTextFile(versionPath, JSON.stringify(versionInfo, null, 2));
-
-      // 修改这部分，使用统一的配置路径
-      const appDir = await invoke('get_app_dir');
-      const configPath = await join(appDir as string, 'config', 'projects.json');
-      await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
-    } catch (error) {
-      console.error('创建版本文件失败:', error);
-    }
-
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '正在上传文件...' });
-    // 保远程径以 / 开头
-    const remotePath = project.serverInfo.remotePath.startsWith('/')
-      ? project.serverInfo.remotePath
-      : '/' + project.serverInfo.remotePath;
-
-    // 调用后端发布
     await invoke('deploy_project', {
+      window: appWindow,
       projectName: project.name,
       path: project.path,
       env: project.environment,
       host: project.serverInfo.host,
       username: project.serverInfo.username,
       password: project.serverInfo.password,
-      remotePath: remotePath
+      remotePath: project.serverInfo.remotePath
     });
+
+    // 清理监听器
+    unlisten();
 
     // 发布成功后更新时间和显示提示
     project.lastDeployTime = new Date().toISOString();
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '发布完成' });
+    deployStatusMap.value.set(project.id, { message: '发布完成' });
     showToast('发布成功', 'success');
 
     // 保存到本地配置
@@ -314,7 +292,7 @@ async function deployProject(project: ProjectConfig) {
     if (project.previousVersion) {
       project.version = project.previousVersion;
     }
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '发布失败' });
+    deployStatusMap.value.set(project.id, { message: '发布失败' });
   } finally {
     setProjectDeploying(project.id, false);
   }
@@ -331,7 +309,7 @@ async function rollbackVersion(project: ProjectConfig) {
 
   try {
     setProjectDeploying(project.id, true);
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '准备回滚...' });
+    deployStatusMap.value.set(project.id, { message: '准备回滚...' });
 
     if (!project.previousVersion) {
       throw new Error('没有可回滚的版本');
@@ -381,13 +359,14 @@ async function rollbackVersion(project: ProjectConfig) {
       // 继续执行，不中断回滚流程
     }
 
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '正在回滚文件...' });
+    deployStatusMap.value.set(project.id, { message: '正在回滚文件...' });
     // 确保远程路径以 / 开头
     const remotePath = project.serverInfo.remotePath.startsWith('/')
       ? project.serverInfo.remotePath
       : '/' + project.serverInfo.remotePath;
 
     await invoke('rollback_project', {
+      window: appWindow,
       projectName: project.name,
       path: project.path,
       env: project.environment,
@@ -399,7 +378,7 @@ async function rollbackVersion(project: ProjectConfig) {
 
     // 回滚成功后更新时间和显示提示
     project.lastRollbackTime = new Date().toISOString();
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '回滚完成' });
+    deployStatusMap.value.set(project.id, { message: '回滚完成' });
     showToast('回滚成功', 'success');
 
     // 保存到本地配置
@@ -413,7 +392,7 @@ async function rollbackVersion(project: ProjectConfig) {
       project.version = project.previousVersion;
       project.previousVersion = tempVersion;
     }
-    deployStatusMap.value.set(project.id, { isDeploying: true, status: '回滚失败' });
+    deployStatusMap.value.set(project.id, { message: '回滚失败' });
   } finally {
     setProjectDeploying(project.id, false);
   }
@@ -577,9 +556,15 @@ onMounted(() => {
           <p class="path">{{ project.path }}</p>
           
           <!-- 添加状态显示区域 -->
-          <div v-if="isProjectDeploying(project.id)" class="deploy-status">
+          <div v-if="deployStatusMap.get(project.id)" class="deploy-status">
             <div class="status-indicator"></div>
-            {{ deployStatusMap.get(project.id)?.status || '处理中...' }}
+            <div class="status-content">
+              <div>{{ deployStatusMap.get(project.id)?.message }}</div>
+              <div v-if="deployStatusMap.get(project.id)?.progress" class="progress-info">
+                {{ deployStatusMap.get(project.id)?.progress?.current }}/{{ deployStatusMap.get(project.id)?.progress?.total }}
+                ({{ deployStatusMap.get(project.id)?.progress?.percentage.toFixed(1) }}%)
+              </div>
+            </div>
           </div>
 
           <div class="project-meta">
@@ -1328,5 +1313,13 @@ input {
     opacity: 1;
     transform: translate(-50%, 0);
   }
+}
+
+
+
+.progress-info {
+  margin-top: 4px;
+  font-size: 12px;
+  color: #0284c7;
 }
 </style>
