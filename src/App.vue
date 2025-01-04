@@ -75,8 +75,11 @@ const editingProject = ref<ProjectConfig | null>(null)
 
 // 打开编辑对话框
 function openEditDialog(project: ProjectConfig) {
+
   editingProject.value = { ...project }  // 复制项目数据
   showEditDialog.value = true
+  console.log(editingProject.value)
+
 }
 
 // 保存编辑
@@ -752,11 +755,11 @@ onMounted(() => {
           <label>发布环境：</label>
           <div class="environment-switch">
             <button 
-              :class="{ active: editingProject.environment === 'test' }"
+              :class="{ active: editingProject.environment == 'test' }"
               @click="editingProject.environment = 'test'"
             >测试环境</button>
             <button 
-              :class="{ active: editingProject.environment === 'prod' }"
+              :class="{ active: editingProject.environment == 'prod' }"
               @click="editingProject.environment = 'prod'"
             >正式环境</button>
           </div>
@@ -1321,5 +1324,10 @@ input {
   margin-top: 4px;
   font-size: 12px;
   color: #0284c7;
+}
+button.active {
+  background: #2563eb;
+  color: white;
+  border-color: #2563eb;
 }
 </style>

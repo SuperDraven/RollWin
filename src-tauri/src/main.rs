@@ -183,28 +183,34 @@ async fn deploy_project(
                     .map_err(|e| format!("创建会话失败: {}", e))?;
                 
                 sess.set_tcp_stream(tcp);
-                sess.handshake()
-                    .map_err(|e| format!("握手失败: {}", e))?;
+                sess.set_timeout(60000);  // 60秒
+                
+                // 添加更详细的错误处理
+                if let Err(e) = sess.handshake() {
+                    return Err(format!("SSH握手失败: {}", e));
+                }
 
-                sess.set_timeout(30000);  // 30秒
+                if let Err(e) = sess.userauth_password(&username, &password) {
+                    return Err(format!("用户认证失败: {}", e));
+                }
 
-                sess.userauth_password(&username, &password)
-                    .map_err(|e| format!("认证失败: {}", e))?;
-
-                let sftp = sess.sftp()
-                    .map_err(|e| format!("创建SFTP会话失败: {}", e))?;
+                let sftp = match sess.sftp() {
+                    Ok(sftp) => sftp,
+                    Err(e) => return Err(format!("SFTP会话创建失败: {}", e))
+                };
 
                 // 计算总文件数
                 let local_path = Path::new(&path);
-                let total_files = count_files(local_path)?;
-                let mut uploaded_files = 0;
+                if !local_path.exists() {
+                    return Err(format!("本地路径不存在: {}", path));
+                }
 
-                // 在上传文件之前先备份
-                let backup_dir = get_backup_dir(&project_name, &env)?;
-                let remote_path_buf = PathBuf::from(&remote_path);
-                
-                // 创建备份
-                download_for_backup(&sftp, &remote_path_buf, &PathBuf::from(backup_dir))?;
+                let total_files = count_files(local_path)?;
+                if total_files == 0 {
+                    return Err("目录为空，没有文件需要上传".to_string());
+                }
+
+                let mut uploaded_files = 0;
 
                 // 上传文件
                 let remote_path = Path::new(&remote_path);
@@ -223,7 +229,7 @@ async fn deploy_project(
         }
     }
 
-    Err(format!("连接服务器失败: {}", last_error.unwrap()))
+    Err(format!("连接服务器失败，已重试3次: {}", last_error.unwrap()))
 }
 
 #[command]
@@ -251,6 +257,7 @@ async fn rollback_project(
         .map_err(|e| format!("创建会话失败: {}", e))?;
     
     sess.set_tcp_stream(tcp);
+    sess.set_timeout(60000);  // 60秒
     sess.handshake()
         .map_err(|e| format!("握手失败: {}", e))?;
 
