@@ -240,6 +240,40 @@ async function deployProject(project: ProjectConfig) {
   deployStatusMap.value.set(project.id, { message: '准备发布...' });
 
   try {
+    // 保存当前版本为上一个版本
+    const currentVersion = project.version;
+    
+    // 更新版本号
+    const versionParts = currentVersion.split('.');
+    const major = parseInt(versionParts[0] || '1');
+    const minor = parseInt(versionParts[1] || '0');
+    const patch = parseInt(versionParts[2] || '0') + 1;
+    
+    project.previousVersion = currentVersion;
+    project.version = `${major}.${minor}.${patch}`;
+
+    // 创建 version.json 内容
+    const versionInfo = {
+      version: project.version,
+      previousVersion: project.previousVersion,
+      updateTime: new Date().toISOString(),
+      projectName: project.name,
+      environment: project.environment
+    };
+
+    // 保存 version.json
+    try {
+      const versionPath = await join(project.path, 'version.json');
+      await writeTextFile(versionPath, JSON.stringify(versionInfo, null, 2));
+
+      // 保存项目配置
+      const appDir = await invoke('get_app_dir');
+      const configPath = await join(appDir as string, 'config', 'projects.json');
+      await writeTextFile(configPath, JSON.stringify(projects.value, null, 2));
+    } catch (error) {
+      console.error('创建版本文件失败:', error);
+    }
+
     // 如果有打包命令，先执行打包
     if (project.buildCommand) {
       try {
@@ -258,6 +292,17 @@ async function deployProject(project: ProjectConfig) {
         throw new Error(`执行打包命令失败：${error}`);
       }
     }
+
+    // 先备份线上文件
+    deployStatusMap.value.set(project.id, { message: '正在备份线上文件...' });
+    await invoke('backup_remote_files', {
+      projectName: project.name,
+      env: project.environment,
+      host: project.serverInfo.host,
+      username: project.serverInfo.username,
+      password: project.serverInfo.password,
+      remotePath: project.serverInfo.remotePath
+    });
 
     // 监听上传进度
     const unlisten = await appWindow.listen<UploadProgress>('upload-progress', (event) => {

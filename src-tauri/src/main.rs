@@ -303,6 +303,49 @@ async fn rollback_project(
 }
 
 #[command]
+async fn backup_remote_files(
+    project_name: String,
+    env: String,
+    host: String,
+    username: String,
+    password: String,
+    remote_path: String,
+) -> Result<(), String> {
+    // 连接服务器
+    let host_with_port = if !host.contains(":") {
+        format!("{}:22", host)
+    } else {
+        host.clone()
+    };
+
+    let tcp = TcpStream::connect(&host_with_port)
+        .map_err(|e| format!("连接服务器失败: {}", e))?;
+    
+    let mut sess = Session::new()
+        .map_err(|e| format!("创建会话失败: {}", e))?;
+    
+    sess.set_tcp_stream(tcp);
+    sess.set_timeout(60000);
+    sess.handshake()
+        .map_err(|e| format!("握手失败: {}", e))?;
+
+    sess.userauth_password(&username, &password)
+        .map_err(|e| format!("认证失败: {}", e))?;
+
+    let sftp = sess.sftp()
+        .map_err(|e| format!("创建SFTP会话失败: {}", e))?;
+
+    // 获取备份目录
+    let backup_dir = get_backup_dir(&project_name, &env)?;
+    let remote_path = Path::new(&remote_path);
+
+    // 下载远程文件到本地备份目录
+    download_for_backup(&sftp, remote_path, Path::new(&backup_dir))?;
+
+    Ok(())
+}
+
+#[command]
 fn get_app_dir() -> String {
     #[cfg(debug_assertions)]
     {
@@ -326,7 +369,8 @@ fn main() {
             deploy_project,
             rollback_project,
             get_app_dir,
-            get_backup_dir
+            get_backup_dir,
+            backup_remote_files
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
