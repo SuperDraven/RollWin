@@ -24,6 +24,7 @@ interface ProjectConfig {
     password: string
     remotePath: string
   }
+  needBackup: boolean
 }
 
 interface Toast {
@@ -53,6 +54,7 @@ function isProjectDeploying(projectId: string): boolean {
 const newProject = ref<ProjectConfig>({
   id: '',
   name: '',
+  needBackup: false,
   path: '',
   projectPath: '',
   buildCommand: undefined,  // 改为 undefined
@@ -203,6 +205,7 @@ async function saveProject() {
       name: '',
       path: '',
       projectPath: '',
+      needBackup: false,
       buildCommand: undefined,
       environment: 'prod',
       version: '1.0.0',
@@ -294,15 +297,18 @@ async function deployProject(project: ProjectConfig) {
     }
 
     // 先备份线上文件
-    deployStatusMap.value.set(project.id, { message: '正在备份线上文件...' });
+    // 如果需要备份，则备份
+    if (project.needBackup) {
+      deployStatusMap.value.set(project.id, { message: '正在备份线上文件...' });
     await invoke('backup_remote_files', {
       projectName: project.name,
       env: project.environment,
       host: project.serverInfo.host,
       username: project.serverInfo.username,
-      password: project.serverInfo.password,
-      remotePath: project.serverInfo.remotePath
-    });
+        password: project.serverInfo.password,
+        remotePath: project.serverInfo.remotePath
+      });
+    }
 
     // 监听上传进度
     const unlisten = await appWindow.listen<UploadProgress>('upload-progress', (event) => {
@@ -704,6 +710,20 @@ onMounted(() => {
         </div>
 
         <div class="form-group">
+          <label>是否备份：</label>
+          <div class="environment-switch">
+            <button 
+              :class="{ active: newProject.needBackup }"
+              @click="newProject.needBackup = true"
+            >是</button>
+            <button 
+              :class="{ active: !newProject.needBackup }"
+              @click="newProject.needBackup = false"
+            >否</button>
+          </div>
+        </div>
+
+        <div class="form-group">
           <label>服务器配置</label>
           <div class="server-config">
             <div class="input-row">
@@ -807,6 +827,20 @@ onMounted(() => {
               :class="{ active: editingProject.environment == 'prod' }"
               @click="editingProject.environment = 'prod'"
             >正式环境</button>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>是否备份：</label>
+          <div class="environment-switch">
+            <button 
+              :class="{ active: editingProject.needBackup }"
+              @click="editingProject.needBackup = true"
+            >是</button>
+            <button 
+              :class="{ active: !editingProject.needBackup }"
+              @click="editingProject.needBackup = false"
+            >否</button>
           </div>
         </div>
 
